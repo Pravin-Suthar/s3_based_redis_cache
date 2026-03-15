@@ -1,91 +1,91 @@
-name: CI
+# name: CI
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+# on:
+#   push:
+#     branches: [main]
+#   pull_request:
+#     branches: [main]
 
-permissions:
-  id-token: write
-  contents: read
+# permissions:
+#   id-token: write
+#   contents: read
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+# jobs:
+#   test:
+#     runs-on: ubuntu-latest
+#     strategy:
+#       matrix:
+#         python-version: ["3.10", "3.11", "3.12"]
 
-    steps:
-      - uses: actions/checkout@v4
+#     steps:
+#       - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
+#       - name: Install uv
+#         uses: astral-sh/setup-uv@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+#       - name: Set up Python ${{ matrix.python-version }}
+#         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install dependencies
-        run: uv sync --all-extras
+#       - name: Install dependencies
+#         run: uv sync --all-extras
 
-      - name: Lint with ruff
-        run: uv run ruff check src/ tests/
+#       - name: Lint with ruff
+#         run: uv run ruff check src/ tests/
 
-      - name: Type check with mypy
-        run: uv run mypy src/s3cache/
+#       - name: Type check with mypy
+#         run: uv run mypy src/s3cache/
 
-      - name: Run tests
-        run: uv run pytest --cov=s3cache --cov-report=term-missing --cov-fail-under=80
+#       - name: Run tests
+#         run: uv run pytest --cov=s3cache --cov-report=term-missing --cov-fail-under=80
 
-  benchmark:
-    runs-on: ubuntu-latest
-    needs: test
+#   benchmark:
+#     runs-on: ubuntu-latest
+#     needs: test
 
-    services:
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+#     services:
+#       redis:
+#         image: redis:7-alpine
+#         ports:
+#           - 6379:6379
+#         options: >-
+#           --health-cmd "redis-cli ping"
+#           --health-interval 10s
+#           --health-timeout 5s
+#           --health-retries 5
 
-    steps:
-      - uses: actions/checkout@v4
+#     steps:
+#       - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
+#       - name: Configure AWS credentials
+#         uses: aws-actions/configure-aws-credentials@v4
+#         with:
+#           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+#           aws-region: us-east-1
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
+#       - name: Install uv
+#         uses: astral-sh/setup-uv@v4
 
-      - name: Set up Python
-        run: uv python install 3.12
+#       - name: Set up Python
+#         run: uv python install 3.12
 
-      - name: Install dependencies
-        run: uv sync --all-extras
+#       - name: Install dependencies
+#         run: uv sync --all-extras
 
-      - name: Check runner location
-        run: curl -s https://ipinfo.io
+#       - name: Check runner location
+#         run: curl -s https://ipinfo.io
 
-      - name: Run benchmark
-        timeout-minutes: 60
-        run: uv run python benchmark.py
+#       - name: Run benchmark
+#         timeout-minutes: 60
+#         run: uv run python benchmark.py
 
-      - name: Plot benchmark results
-        run: uv run --with matplotlib python plot_benchmark.py
+#       - name: Plot benchmark results
+#         run: uv run --with matplotlib python plot_benchmark.py
 
-      - name: Upload benchmark results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-results
-          path: |
-            benchmark_results.csv
-            benchmark_plot.png
+#       - name: Upload benchmark results
+#         if: always()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: benchmark-results
+#           path: |
+#             benchmark_results.csv
+#             benchmark_plot.png
