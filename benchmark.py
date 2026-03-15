@@ -83,7 +83,7 @@ SIZES = [
     ("50MB", 50),
 ]
 
-ITERATIONS = 10
+ITERATIONS = 50
 CSV_FILE = "benchmark_results.csv"
 
 

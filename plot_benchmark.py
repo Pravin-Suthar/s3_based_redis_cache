@@ -1,6 +1,6 @@
 """
 Reads benchmark_results.csv and plots:
-  - p99 latency: ClickHouse vs Cache Hit (per size)
+  - p50, p90, p95, p99 latency: ClickHouse vs Cache Hit (per size)
   - Min latency: ClickHouse vs Cache Hit (per size)
 
 Usage:
@@ -40,45 +40,48 @@ def main() -> None:
         hit_latencies[label].append(float(row["total_hit_ms"]))
 
     labels = size_order
-    ch_p99 = [percentile(ch_latencies[l], 99) for l in labels]
-    ch_min = [min(ch_latencies[l]) for l in labels]
-    hit_p99 = [percentile(hit_latencies[l], 99) for l in labels]
-    hit_min = [min(hit_latencies[l]) for l in labels]
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
-
-    # ── p99 plot ──
     x = range(len(labels))
-    ax1.plot(x, ch_p99, "o-", color="#e74c3c", linewidth=2, markersize=6, label="ClickHouse (p99)")
-    ax1.plot(x, hit_p99, "s-", color="#2ecc71", linewidth=2, markersize=6, label="S3 Cache Hit (p99)")
-    ax1.fill_between(x, hit_p99, ch_p99, alpha=0.1, color="#2ecc71",
-                     where=[h < c for h, c in zip(hit_p99, ch_p99)])
-    ax1.fill_between(x, hit_p99, ch_p99, alpha=0.1, color="#e74c3c",
-                     where=[h >= c for h, c in zip(hit_p99, ch_p99)])
-    ax1.set_xticks(list(x))
-    ax1.set_xticklabels(labels, rotation=45, ha="right")
-    ax1.set_xlabel("Response Size")
-    ax1.set_ylabel("Latency (ms)")
-    ax1.set_title("p99 Latency: ClickHouse vs S3 Cache Hit")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    ax1.set_yscale("log")
 
-    # ── Min plot ──
-    ax2.plot(x, ch_min, "o-", color="#e74c3c", linewidth=2, markersize=6, label="ClickHouse (min)")
-    ax2.plot(x, hit_min, "s-", color="#2ecc71", linewidth=2, markersize=6, label="S3 Cache Hit (min)")
-    ax2.fill_between(x, hit_min, ch_min, alpha=0.1, color="#2ecc71",
-                     where=[h < c for h, c in zip(hit_min, ch_min)])
-    ax2.fill_between(x, hit_min, ch_min, alpha=0.1, color="#e74c3c",
-                     where=[h >= c for h, c in zip(hit_min, ch_min)])
-    ax2.set_xticks(list(x))
-    ax2.set_xticklabels(labels, rotation=45, ha="right")
-    ax2.set_xlabel("Response Size")
-    ax2.set_title("Min Latency: ClickHouse vs S3 Cache Hit")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    ax2.set_yscale("log")
+    percentiles = [
+        (50, "p50"),
+        (90, "p90"),
+        (95, "p95"),
+        (99, "p99"),
+        (0, "min"),
+    ]
 
+    fig, axes = plt.subplots(1, 5, figsize=(28, 6), sharey=True)
+
+    for ax, (pval, pname) in zip(axes, percentiles):
+        if pname == "min":
+            ch_vals = [min(ch_latencies[l]) for l in labels]
+            hit_vals = [min(hit_latencies[l]) for l in labels]
+        else:
+            ch_vals = [percentile(ch_latencies[l], pval) for l in labels]
+            hit_vals = [percentile(hit_latencies[l], pval) for l in labels]
+
+        ax.plot(x, ch_vals, "o-", color="#e74c3c", linewidth=2, markersize=5,
+                label="ClickHouse")
+        ax.plot(x, hit_vals, "s-", color="#2ecc71", linewidth=2, markersize=5,
+                label="S3 Cache Hit")
+
+        # Shade: green where cache wins, red where CH wins
+        ax.fill_between(x, hit_vals, ch_vals, alpha=0.1, color="#2ecc71",
+                        where=[h < c for h, c in zip(hit_vals, ch_vals)])
+        ax.fill_between(x, hit_vals, ch_vals, alpha=0.1, color="#e74c3c",
+                        where=[h >= c for h, c in zip(hit_vals, ch_vals)])
+
+        ax.set_xticks(list(x))
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+        ax.set_xlabel("Response Size")
+        ax.set_title(f"{pname.upper()} Latency", fontweight="bold")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_yscale("log")
+
+    axes[0].set_ylabel("Latency (ms, log scale)")
+
+    fig.suptitle("ClickHouse vs S3 Cache Hit Latency by Percentile", fontsize=14, fontweight="bold")
     plt.tight_layout()
     plt.savefig("benchmark_plot.png", dpi=150, bbox_inches="tight")
     print("Saved benchmark_plot.png")
