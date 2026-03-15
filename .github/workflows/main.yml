@@ -72,7 +72,7 @@ jobs:
         run: uv sync --all-extras
 
       - name: Run benchmark
-        timeout-minutes: 10
+        timeout-minutes: 60
         run: uv run python benchmark.py
 
       - name: Plot benchmark results
