@@ -74,3 +74,15 @@ jobs:
       - name: Run benchmark
         timeout-minutes: 10
         run: uv run python benchmark.py
+
+      - name: Plot benchmark results
+        run: uv run --with matplotlib python plot_benchmark.py
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            benchmark_results.csv
+            benchmark_plot.png
