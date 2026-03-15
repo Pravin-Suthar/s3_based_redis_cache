@@ -2,7 +2,7 @@
 Quick start:
     docker run -d -p 6379:6379 redis:7-alpine
     source .venv/bin/activate
-    python example.py
+    python benchmark.py
 
 Requires:
     - Redis running on localhost:6379
@@ -10,6 +10,7 @@ Requires:
     - An existing S3 bucket
 """
 
+import csv
 import math
 import random
 import string
@@ -32,20 +33,63 @@ mgr = CacheManager.initialize(
 # this needs to be false in production here we are doing sequential for performance metrics
 mgr._sync_mode = True
 
-SIZES_MB = sorted(random.sample(range(1, 20), 4))
-ITERATIONS = 3
+# ── Realistic ClickHouse latency model ──
+#
+# Based on typical ClickHouse analytical query performance:
+#
+#   Component               | Estimate
+#   ─────────────────────── | ─────────────────────────────────────────
+#   Query parse + plan      | ~10ms (constant)
+#   Column scan (compressed)| ~50ms base + near-zero for small results
+#   Aggregation / merge     | ~20ms base, scales with row count
+#   Result serialization    | ~50ms/MB (row→JSON/Native format)
+#   Network transfer        | ~80ms/MB (cross-AZ or app↔CH latency)
+#   ─────────────────────── | ─────────────────────────────────────────
+#   Total model             | 0.08s + 0.13s * size_mb
+#
+# Examples:
+#   1KB  → ~80ms   (overhead-dominated, fast point/agg query)
+#   100KB→ ~93ms   (still mostly overhead)
+#   1MB  → ~210ms  (serialization + transfer start to matter)
+#   10MB → ~1.38s  (transfer-dominated)
+#   50MB → ~6.58s  (large analytical export)
+#
+# Source: ClickHouse docs benchmarks, real-world observability on MergeTree
+# tables with 100M-1B rows, queries over LAN/cross-AZ networking.
 
-DB_BASE_SEC = 3
+# Based on real ClickHouse perf: ~10ms parse/plan, ~50ms base scan, ~50ms/MB serialization, ~80ms/MB network transfer
+CH_BASE_SEC = 0.08       # fixed overhead: parse + plan + base scan
+CH_PER_MB_SEC = 0.13     # serialization + network per MB of result
 
 
-def db_latency(size_mb: int) -> float:
-    """Simulate realistic DB latency: 3s base, log growth."""
-    return DB_BASE_SEC * (1 + math.log2(size_mb))
+def ch_latency(size_mb: float) -> float:
+    """Estimated ClickHouse query latency for a given result size."""
+    return CH_BASE_SEC + CH_PER_MB_SEC * size_mb
 
 
-def generate_data(size_mb: int) -> list[dict[str, str]]:
+# Sizes from tiny KB payloads (where caching may not help) up to large MB results
+SIZES = [
+    ("1KB", 1 / 1024),
+    ("10KB", 10 / 1024),
+    ("50KB", 50 / 1024),
+    ("100KB", 100 / 1024),
+    ("500KB", 500 / 1024),
+    ("1MB", 1),
+    ("2MB", 2),
+    ("5MB", 5),
+    ("10MB", 10),
+    ("20MB", 20),
+    ("30MB", 30),
+    ("50MB", 50),
+]
+
+ITERATIONS = 10
+CSV_FILE = "benchmark_results.csv"
+
+
+def generate_data(size_mb: float) -> list[dict[str, str]]:
     row_size = 200
-    num_rows = int((size_mb * 1024 * 1024) / row_size)
+    num_rows = max(1, int((size_mb * 1024 * 1024) / row_size))
     return [
         {
             "id": str(i),
@@ -69,25 +113,28 @@ def fmt_ms(ms: float) -> str:
     return f"{ms:.1f}ms"
 
 
-# Pre-generate data
-pregenerated: dict[str, list[dict[str, str]]] = {}
+# CSV rows collector
+csv_rows: list[dict[str, object]] = []
 
-print(f"Sizes: {SIZES_MB} MB | Iterations: {ITERATIONS}")
-print(f"DB latency: {DB_BASE_SEC}s base, log scale "
-      f"(1MB={db_latency(1):.1f}s, 10MB={db_latency(10):.1f}s, 50MB={db_latency(50):.1f}s)\n")
+print(f"Sizes: {[s[0] for s in SIZES]} | Iterations: {ITERATIONS}")
+print(f"ClickHouse latency model: {CH_BASE_SEC}s base + {CH_PER_MB_SEC}s/MB")
+print(f"  1KB={ch_latency(1/1024)*1000:.0f}ms, 1MB={ch_latency(1)*1000:.0f}ms, "
+      f"10MB={ch_latency(10):.2f}s, 50MB={ch_latency(50):.2f}s\n")
 
 print("Generating test data...")
-for size in SIZES_MB:
-    for i in range(ITERATIONS):
-        pregenerated[f"{size}mb_{i}"] = generate_data(size)
-    print(f"  {size:>2}MB -> {len(pregenerated[f'{size}mb_0'])} rows")
+pregenerated: dict[str, list[dict[str, str]]] = {}
+for label, size_mb in SIZES:
+    pregenerated[label] = generate_data(size_mb)
+    row_count = len(pregenerated[label])
+    print(f"  {label:>5} -> {row_count:>7} rows")
 print()
 
 mgr.clear()
 
 # ── Benchmark ──
-for size in SIZES_MB:
-    sim_db_time = db_latency(size)
+for label, size_mb in SIZES:
+    sim_db_sec = ch_latency(size_mb)
+    raw_bytes = int(size_mb * 1024 * 1024)
 
     serialize_times: list[float] = []
     upload_times: list[float] = []
@@ -98,21 +145,21 @@ for size in SIZES_MB:
     compressed_sizes: list[int] = []
 
     for i in range(ITERATIONS):
-        data_key = f"{size}mb_{i}"
-        data = pregenerated[data_key]
-        query = f"SELECT * FROM table_{size}mb_{i}"
-        cache_key = make_cache_key(query, (data_key, sim_db_time), {}, "benchmark")
+        data = pregenerated[label]
+        query = f"SELECT * FROM table_{label}_{i}"
+        cache_key = make_cache_key(query, (label, i, sim_db_sec), {}, "benchmark")
 
         # ── MISS PATH: simulate DB + serialize + compress + upload + redis write ──
         t_total = time.perf_counter()
 
-        # 1) Simulated DB time (fixed)
-        time.sleep(sim_db_time)
+        # 1) Simulated ClickHouse query time
+        time.sleep(sim_db_sec)
 
         # 2) Serialize + compress
         t0 = time.perf_counter()
         compressed, fmt = serialize(data, "auto", "zstd")
-        serialize_times.append((time.perf_counter() - t0) * 1000)
+        ser_ms = (time.perf_counter() - t0) * 1000
+        serialize_times.append(ser_ms)
         compressed_sizes.append(len(compressed))
 
         # 3) S3 upload + Redis write
@@ -125,9 +172,11 @@ for size in SIZES_MB:
             "size_bytes": str(len(compressed)),
         })
         mgr.redis.expire(mgr._redis_key(cache_key), 3600)
-        upload_times.append((time.perf_counter() - t0) * 1000)
+        upl_ms = (time.perf_counter() - t0) * 1000
+        upload_times.append(upl_ms)
 
-        total_miss_times.append((time.perf_counter() - t_total) * 1000)
+        miss_ms = (time.perf_counter() - t_total) * 1000
+        total_miss_times.append(miss_ms)
 
         # ── HIT PATH: redis lookup + S3 download + decompress + deserialize ──
         t_total = time.perf_counter()
@@ -135,14 +184,35 @@ for size in SIZES_MB:
         # 1) S3 download
         t0 = time.perf_counter()
         raw = mgr.storage.get(s3_path)
-        download_times.append((time.perf_counter() - t0) * 1000)
+        dl_ms = (time.perf_counter() - t0) * 1000
+        download_times.append(dl_ms)
 
         # 2) Decompress + deserialize
         t0 = time.perf_counter()
         _ = deserialize(raw, fmt, "zstd")
-        deserialize_times.append((time.perf_counter() - t0) * 1000)
+        deser_ms = (time.perf_counter() - t0) * 1000
+        deserialize_times.append(deser_ms)
 
-        total_hit_times.append((time.perf_counter() - t_total) * 1000)
+        hit_ms = (time.perf_counter() - t_total) * 1000
+        total_hit_times.append(hit_ms)
+
+        # Per-iteration CSV row
+        csv_rows.append({
+            "size_label": label,
+            "size_mb": round(size_mb, 4),
+            "iteration": i + 1,
+            "raw_size_bytes": raw_bytes,
+            "compressed_size_bytes": len(compressed),
+            "compression_ratio_pct": round((1 - len(compressed) / max(raw_bytes, 1)) * 100, 2),
+            "ch_latency_ms": round(sim_db_sec * 1000, 2),
+            "serialize_ms": round(ser_ms, 2),
+            "s3_upload_ms": round(upl_ms, 2),
+            "total_miss_ms": round(miss_ms, 2),
+            "s3_download_ms": round(dl_ms, 2),
+            "deserialize_ms": round(deser_ms, 2),
+            "total_hit_ms": round(hit_ms, 2),
+            "speedup_pct": round(((miss_ms - hit_ms) / miss_ms) * 100, 2),
+        })
 
         # cleanup for next iteration
         mgr.storage.delete(s3_path)
@@ -151,43 +221,61 @@ for size in SIZES_MB:
     avg_compressed = sum(compressed_sizes) / len(compressed_sizes)
 
     print(f"{'=' * 70}")
-    print(f"  {size}MB Response | Compressed: {avg_compressed / 1024 / 1024:.2f}MB "
-          f"({(1 - avg_compressed / (size * 1024 * 1024)) * 100:.0f}% reduction)")
+    print(f"  {label} Response | Compressed: {avg_compressed / 1024:.1f}KB "
+          f"({(1 - avg_compressed / max(raw_bytes, 1)) * 100:.0f}% reduction)")
     print(f"{'=' * 70}")
     print()
 
     # Miss breakdown
-    print(f"  CACHE MISS (without cache):")
-    print(f"    DB query (simulated)     : {fmt_ms(sim_db_time * 1000):>10}  (fixed)")
+    print(f"  CACHE MISS (cold path = ClickHouse + serialize + S3 upload):")
+    print(f"    ClickHouse query (sim)   : {fmt_ms(sim_db_sec * 1000):>10}")
     print(f"    Serialize + compress     : {fmt_ms(sum(serialize_times) / ITERATIONS):>10}  "
-          f"(p95: {fmt_ms(percentile(serialize_times, 95))})")
+          f"(p50: {fmt_ms(percentile(serialize_times, 50))}, "
+          f"p95: {fmt_ms(percentile(serialize_times, 95))})")
     print(f"    S3 upload + Redis write  : {fmt_ms(sum(upload_times) / ITERATIONS):>10}  "
-          f"(p95: {fmt_ms(percentile(upload_times, 95))})")
+          f"(p50: {fmt_ms(percentile(upload_times, 50))}, "
+          f"p95: {fmt_ms(percentile(upload_times, 95))})")
     avg_miss = sum(total_miss_times) / ITERATIONS
     print(f"    ─────────────────────────")
     print(f"    Total                    : {fmt_ms(avg_miss):>10}  "
-          f"(p95: {fmt_ms(percentile(total_miss_times, 95))}, "
-          f"p99: {fmt_ms(percentile(total_miss_times, 99))})")
+          f"(p50: {fmt_ms(percentile(total_miss_times, 50))}, "
+          f"p95: {fmt_ms(percentile(total_miss_times, 95))})")
     print()
 
     # Hit breakdown
-    print(f"  CACHE HIT (with cache):")
+    print(f"  CACHE HIT (warm path = S3 download + deserialize):")
     print(f"    S3 download              : {fmt_ms(sum(download_times) / ITERATIONS):>10}  "
-          f"(p95: {fmt_ms(percentile(download_times, 95))})")
+          f"(p50: {fmt_ms(percentile(download_times, 50))}, "
+          f"p95: {fmt_ms(percentile(download_times, 95))})")
     print(f"    Decompress + deserialize : {fmt_ms(sum(deserialize_times) / ITERATIONS):>10}  "
-          f"(p95: {fmt_ms(percentile(deserialize_times, 95))})")
+          f"(p50: {fmt_ms(percentile(deserialize_times, 50))}, "
+          f"p95: {fmt_ms(percentile(deserialize_times, 95))})")
     avg_hit = sum(total_hit_times) / ITERATIONS
     print(f"    ─────────────────────────")
     print(f"    Total                    : {fmt_ms(avg_hit):>10}  "
-          f"(p95: {fmt_ms(percentile(total_hit_times, 95))}, "
-          f"p99: {fmt_ms(percentile(total_hit_times, 99))})")
+          f"(p50: {fmt_ms(percentile(total_hit_times, 50))}, "
+          f"p95: {fmt_ms(percentile(total_hit_times, 95))})")
     print()
 
     saved_pct = ((avg_miss - avg_hit) / avg_miss) * 100
-    print(f"  Saved: {saved_pct:.1f}% | "
-          f"Miss: {fmt_ms(avg_miss)} -> Hit: {fmt_ms(avg_hit)}")
+    verdict = "CACHE WINS" if avg_hit < sim_db_sec * 1000 else "CACHE SLOWER THAN CH"
+    print(f"  {verdict} | Speedup: {saved_pct:.1f}% | "
+          f"Miss: {fmt_ms(avg_miss)} -> Hit: {fmt_ms(avg_hit)} "
+          f"(vs CH alone: {fmt_ms(sim_db_sec * 1000)})")
     print()
 
-print(f"\nStats: {mgr.stats()}")
+# ── Write CSV ──
+fieldnames = [
+    "size_label", "size_mb", "iteration", "raw_size_bytes", "compressed_size_bytes",
+    "compression_ratio_pct", "ch_latency_ms", "serialize_ms", "s3_upload_ms",
+    "total_miss_ms", "s3_download_ms", "deserialize_ms", "total_hit_ms", "speedup_pct",
+]
+with open(CSV_FILE, "w", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(csv_rows)
+
+print(f"\nResults written to {CSV_FILE} ({len(csv_rows)} rows)")
+print(f"Stats: {mgr.stats()}")
 mgr.clear()
 print("Cache cleared.")
