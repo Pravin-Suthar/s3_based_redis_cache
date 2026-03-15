@@ -214,9 +214,6 @@ for label, size_mb in SIZES:
             "speedup_pct": round(((miss_ms - hit_ms) / miss_ms) * 100, 2),
         })
 
-        # cleanup for next iteration
-        mgr.storage.delete(s3_path)
-        mgr.redis.delete(mgr._redis_key(cache_key))
 
     avg_compressed = sum(compressed_sizes) / len(compressed_sizes)
 
@@ -277,5 +274,3 @@ with open(CSV_FILE, "w", newline="") as f:
 
 print(f"\nResults written to {CSV_FILE} ({len(csv_rows)} rows)")
 print(f"Stats: {mgr.stats()}")
-mgr.clear()
-print("Cache cleared.")
