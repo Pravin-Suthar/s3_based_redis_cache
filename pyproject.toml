@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "s3cache"
 version = "0.1.0"
-description = "Decorator-based query caching with Redis metadata and S3 storage"
+description = "Decorator-based caching with Redis metadata and S3 storage"
 requires-python = ">=3.9"
 dependencies = [
     "redis>=5.0",
