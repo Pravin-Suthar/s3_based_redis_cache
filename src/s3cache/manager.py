@@ -69,7 +69,7 @@ class CacheManager:
 
     def __init__(
         self,
-        redis_client: redis.Redis,  # type: ignore[type-arg]
+        redis_client: redis.Redis[bytes],
         storage: StorageBackend,
         redis_key_prefix: str,
         default_ttl: int,
@@ -106,7 +106,7 @@ class CacheManager:
         local_path: str = "/tmp/query_cache",
         aws_region: str = "us-east-1",
         # For testing: allow injecting dependencies
-        _redis_client: redis.Redis | None = None,  # type: ignore[type-arg]
+        _redis_client: redis.Redis[bytes] | None = None,
         _storage: StorageBackend | None = None,
     ) -> CacheManager:
         with cls._lock:
@@ -167,11 +167,11 @@ class CacheManager:
             if not meta:
                 return False, None
 
-            raw_s3 = meta.get(b"s3_path", meta.get("s3_path", b""))
+            raw_s3 = meta.get(b"s3_path", b"")
             s3_path = raw_s3.decode() if isinstance(raw_s3, bytes) else str(raw_s3)
-            raw_fmt = meta.get(b"format", meta.get("format", b"pickle"))
+            raw_fmt = meta.get(b"format", b"pickle")
             fmt = raw_fmt.decode() if isinstance(raw_fmt, bytes) else str(raw_fmt)
-            raw_comp = meta.get(b"compression", meta.get("compression", b"zstd"))
+            raw_comp = meta.get(b"compression", b"zstd")
             compression = raw_comp.decode() if isinstance(raw_comp, bytes) else str(raw_comp)
 
             if not s3_path:
