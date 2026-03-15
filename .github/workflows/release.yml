@@ -62,7 +62,7 @@ jobs:
   publish-pypi:
     needs: build
     runs-on: ubuntu-latest
-    environment: pypi    # configure this in GitHub repo settings
+    environment: production
 
     steps:
       - name: Download build artifacts
