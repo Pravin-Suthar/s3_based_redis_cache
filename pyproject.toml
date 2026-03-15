@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "s3cache"
+name = "redis-s3-cache"
 dynamic = ["version"]
 description = "Decorator-based caching with Redis metadata and S3 storage"
 readme = "README.md"
